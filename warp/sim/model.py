@@ -511,6 +511,7 @@ class Model:
     Attributes:
         requires_grad (float): Indicates whether the model was finalized (see :meth:`ModelBuilder.finalize`) with gradient computation enabled
         num_envs (int): Number of articulation environments that were added to the ModelBuilder via `add_builder`
+        iteration_nr (int): Can be set to indicate that his model is the result after n iterative refinements.
 
         particle_q (array): Particle positions, shape [particle_count, 3], float
         particle_qd (array): Particle velocities, shape [particle_count, 3], float
@@ -658,6 +659,8 @@ class Model:
         rigid_contact_point_id (array): Contact point ID, shape [rigid_contact_max], int
         rigid_contact_point_limit (array): Contact point limit, shape [rigid_contact_max], int
 
+        sigma_mesh_perturbation (float): If >0, defines a standard deviation for randomized perturbations applied to mesh vertices
+
         ground (bool): Whether the ground plane and ground contacts are enabled
         ground_plane (array): Ground plane 3D normal and offset, shape [4], float
         up_vector (np.ndarray): Up vector of the world, shape [3], float
@@ -692,6 +695,7 @@ class Model:
     def __init__(self, device=None):
         self.requires_grad = False
         self.num_envs = 0
+        self.iteration_nr: int = 0
 
         self.particle_q = None
         self.particle_qd = None
@@ -837,6 +841,8 @@ class Model:
         self.rigid_contact_broad_shape1 = None
         self.rigid_contact_point_id = None
         self.rigid_contact_point_limit = None
+
+        self.sigma_mesh_perturbation: float = 0.0
 
         # toggles ground contact for all shapes
         self.ground = True
@@ -4585,7 +4591,7 @@ class ModelBuilder:
             # -------------------------------------
             # construct Model (non-time varying) data
 
-            m = Model(device)
+            m = Model(device, )
             m.requires_grad = requires_grad
 
             m.ground_plane_params = self._ground_params["plane"]

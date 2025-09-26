@@ -21,6 +21,7 @@ from typing import Optional
 
 import numpy as np
 
+from docbrown.kernels.spatialmath import gaussian_perturbation
 import warp as wp
 from warp.sim.model import Model, State
 
@@ -1117,6 +1118,8 @@ def handle_contact_pairs(
     contact_point_id: wp.array(dtype=int),
     contact_point_limit: wp.array(dtype=int),
     edge_sdf_iter: int,
+    sigma_perturbation: float,
+    seed_perturbation: int,
     # outputs
     contact_count: wp.array(dtype=int),
     contact_shape0: wp.array(dtype=int),
@@ -1130,6 +1133,14 @@ def handle_contact_pairs(
     contact_pairwise_counter: wp.array(dtype=int),
     contact_tids: wp.array(dtype=int),
 ):
+    """
+    Custom changes made in this function:
+    The function now supports & expects the parameters "sigma_perturbation" and "seed_perturbation" that parameterize a
+    random distortion of mesh vertices. Sigma distortion specifies the amplitude of distortion, and setting it to zero
+    corresponds to the default kernel. seed_perturbation is useful to control randomness in the process: through random
+    seeding, we ensure that the same mesh vertex of the same geo is distorted in the same way if seed_perturbation is
+    the same, but if one of these indices differ, distortion will be different, soo.
+    """
     tid = wp.tid()
     shape_a = contact_broad_shape0[tid]
     shape_b = contact_broad_shape1[tid]
@@ -1380,6 +1391,8 @@ def handle_contact_pairs(
         # vertex-based contact
         mesh = wp.mesh_get(geo.source[shape_a])
         body_a_pos = wp.cw_mul(mesh.points[point_id], geo_scale_a)
+        if sigma_perturbation != 0.0:
+            body_a_pos = gaussian_perturbation(body_a_pos, sigma_perturbation, seed_perturbation, shape_a, point_id)
         p_a_world = wp.transform_point(X_ws_a, body_a_pos)
         # find closest point + contact normal on capsule B
         half_height_b = geo_scale_b[1]
@@ -1435,6 +1448,8 @@ def handle_contact_pairs(
         # vertex-based contact
         mesh = wp.mesh_get(geo.source[shape_a])
         body_a_pos = wp.cw_mul(mesh.points[point_id], geo_scale_a)
+        if sigma_perturbation != 0.0:
+            body_a_pos = gaussian_perturbation(body_a_pos, sigma_perturbation, seed_perturbation, shape_a, point_id)
         p_a_world = wp.transform_point(X_ws_a, body_a_pos)
         # find closest point + contact normal on box B
         query_b = wp.transform_point(X_sw_b, p_a_world)
@@ -1479,6 +1494,8 @@ def handle_contact_pairs(
         mesh_b = geo.source[shape_b]
 
         body_a_pos = wp.cw_mul(mesh.points[point_id], geo_scale_a)
+        if sigma_perturbation != 0.0:
+            body_a_pos = gaussian_perturbation(body_a_pos, sigma_perturbation, seed_perturbation, shape_a, point_id)
         p_a_world = wp.transform_point(X_ws_a, body_a_pos)
         query_b_local = wp.transform_point(X_sw_b, p_a_world)
 
@@ -1489,7 +1506,7 @@ def handle_contact_pairs(
         min_scale = min(min_scale_a, min_scale_b)
         max_dist = (rigid_contact_margin + thickness) / min_scale
 
-        res = wp.mesh_query_point_sign_normal(
+        res = wp.mesh_query_point_sign_normal(  # TODO: mesh b is currently not perturbed
             mesh_b, wp.cw_div(query_b_local, geo_scale_b), max_dist, sign, face_index, face_u, face_v
         )
 
@@ -1508,6 +1525,8 @@ def handle_contact_pairs(
         # vertex-based contact
         mesh = wp.mesh_get(geo.source[shape_a])
         body_a_pos = wp.cw_mul(mesh.points[point_id], geo_scale_a)
+        if sigma_perturbation != 0.0:
+            body_a_pos = gaussian_perturbation(body_a_pos, sigma_perturbation, seed_perturbation, shape_a, point_id)
         p_a_world = wp.transform_point(X_ws_a, body_a_pos)
         query_b = wp.transform_point(X_sw_b, p_a_world)
         p_b_body = closest_point_plane(geo_scale_b[0], geo_scale_b[1], query_b)
@@ -1719,6 +1738,8 @@ def collide(
                     model.rigid_contact_point_id,
                     model.rigid_contact_point_limit,
                     edge_sdf_iter,
+                    model.sigma_mesh_perturbation,
+                    model.iteration_nr
                 ],
                 outputs=[
                     model.rigid_contact_count,
