@@ -65,10 +65,3 @@ from .utils import (
     quat_to_euler,
     velocity_at_point,
 )
-
-warn(
-    "The `warp.sim` module is deprecated and will be removed in v1.10. "
-    "Please transition to using the forthcoming Newton library instead.",
-    DeprecationWarning,
-    stacklevel=2,
-)
