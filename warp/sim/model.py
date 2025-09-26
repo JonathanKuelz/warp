@@ -4812,9 +4812,9 @@ class ModelBuilder:
 
             # enable ground plane
             m.ground_plane = wp.array(self._ground_params["plane"], dtype=wp.float32, requires_grad=requires_grad)
-            m.gravity = np.array(self.up_vector, dtype=wp.float32) * self.gravity
+            m.gravity = np.array(self.up_vector, dtype=np.float32) * self.gravity
             m.up_axis = self.up_axis
-            m.up_vector = np.array(self.up_vector, dtype=wp.float32)
+            m.up_vector = np.array(self.up_vector, dtype=np.float32)
 
             m.enable_tri_collisions = False
 
