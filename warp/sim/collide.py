@@ -21,11 +21,24 @@ from typing import Optional
 
 import numpy as np
 
-from docbrown.kernels.spatialmath import gaussian_perturbation
 import warp as wp
 from warp.sim.model import Model, State
 
 from .model import PARTICLE_FLAG_ACTIVE, ModelShapeGeometry
+
+
+@wp.func
+def simple_three_hash(x1: int, x2: int, x3: int) -> int:
+    """A simple hash function for three integers."""
+    return (x1 * 73856093) ^ (x2 * 19349663) ^ (x3 * 83492791) % 1048576
+
+
+@wp.func
+def gaussian_perturbation(p: wp.vec3, sigma: float, seed: int, geo_id: int, point_id: int) -> wp.vec3:
+    """Adds a gaussian perturbation with standard deviation sigma to p; seed, geo_id and point_id select the sample."""
+    state = wp.rand_init(simple_three_hash(seed, geo_id, point_id))
+    return p + wp.vec3(wp.randn(state), wp.randn(state), wp.randn(state)) * sigma
+
 
 # types of triangle's closest point to a point
 TRI_CONTACT_FEATURE_VERTEX_A = wp.constant(0)
