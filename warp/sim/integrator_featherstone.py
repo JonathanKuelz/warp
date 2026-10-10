@@ -1785,6 +1785,14 @@ class FeatherstoneIntegrator(Integrator):
             # articulations
 
             if model.joint_count:
+                # eval_rigid_fk overwrites state_in.body_q, which eval_fk already wrote at the end of the previous
+                # step. Zero its adjoint once eval_rigid_fk's backward has consumed it, otherwise it would be
+                # propagated to joint_q a second time through the overwritten eval_fk output.
+                tape = wp.context.runtime.tape
+                if tape is not None and state_in.body_q.requires_grad:
+                    body_q = state_in.body_q
+                    tape.record_func(backward=lambda: body_q.grad.zero_(), arrays=[body_q])
+
                 # evaluate body transforms
                 wp.launch(
                     eval_rigid_fk,
