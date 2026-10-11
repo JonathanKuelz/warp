@@ -787,6 +787,7 @@ def count_contact_points(
     contact_pairs: wp.array(dtype=int, ndim=2),
     geo: ModelShapeGeometry,
     mesh_contact_max: int,
+    mesh_plane_contact_points: int,
     # outputs
     contact_count: wp.array(dtype=int),
 ):
@@ -865,6 +866,9 @@ def count_contact_points(
     elif actual_type_a == wp.sim.GEO_MESH:
         mesh_a = wp.mesh_get(geo.source[actual_shape_a])
         num_contacts_a = mesh_a.points.shape[0]
+        if actual_type_b == wp.sim.GEO_PLANE and mesh_plane_contact_points > 0:
+            # only the K deepest mesh vertices are considered against a plane
+            num_contacts_a = wp.min(mesh_plane_contact_points, num_contacts_a)
         if mesh_contact_max > 0:
             num_contacts_a = wp.min(mesh_contact_max, num_contacts_a)
         if actual_type_b == wp.sim.GEO_MESH:
@@ -902,6 +906,7 @@ def broadphase_collision_pairs(
     rigid_contact_margin: float,
     mesh_contact_max: int,
     iterate_mesh_vertices: bool,
+    mesh_plane_contact_points: int,
     # outputs
     contact_count: wp.array(dtype=int),
     contact_shape0: wp.array(dtype=int),
@@ -1070,6 +1075,9 @@ def broadphase_collision_pairs(
         elif actual_type_b != wp.sim.GEO_PLANE:
             print("broadphase_collision_pairs: unsupported geometry type for mesh collision")
             return
+        elif mesh_plane_contact_points > 0:
+            # only the K deepest mesh vertices are considered against a plane (selected in handle_contact_pairs)
+            num_contacts_a = wp.min(mesh_plane_contact_points, num_contacts_a)
         num_contacts = num_contacts_a + num_contacts_b
         if num_contacts > 0:
             index = wp.atomic_add(contact_count, 0, num_contacts)
@@ -1118,6 +1126,70 @@ def broadphase_collision_pairs(
                 contact_point_limit[pair_index_ba] = 0
 
 
+@wp.func
+def mesh_plane_vertex_distance(
+    p_a_world: wp.vec3,
+    X_ws_b: wp.transform,
+    X_sw_b: wp.transform,
+    geo_scale_b: wp.vec3,
+):
+    """Distance of a world point to a plane shape, as computed in the mesh-vs-plane branch of handle_contact_pairs."""
+    query_b = wp.transform_point(X_sw_b, p_a_world)
+    p_b_body = closest_point_plane(geo_scale_b[0], geo_scale_b[1], query_b)
+    p_b_world = wp.transform_point(X_ws_b, p_b_body)
+    diff = p_a_world - p_b_world
+    distance = float(0.0)
+    if (geo_scale_b[0] == 0.0 and geo_scale_b[1] == 0.0) or (
+        wp.abs(query_b[0]) < geo_scale_b[0] and wp.abs(query_b[2]) < geo_scale_b[1]
+    ):
+        normal = wp.transform_vector(X_ws_b, wp.vec3(0.0, 1.0, 0.0))
+        distance = wp.dot(diff, normal)
+    else:
+        distance = wp.length(diff)
+    return distance
+
+
+@wp.func
+def select_mesh_plane_vertex(
+    mesh_id: wp.uint64,
+    rank: int,
+    geo_scale_a: wp.vec3,
+    X_ws_a: wp.transform,
+    X_ws_b: wp.transform,
+    X_sw_b: wp.transform,
+    geo_scale_b: wp.vec3,
+    sigma_perturbation: float,
+    seed_perturbation: int,
+    shape_a: int,
+):
+    """Index of the mesh vertex with the `rank`-th smallest distance to the plane (rank 0 = deepest).
+
+    Vertices are totally ordered by (distance, index); rank + 1 passes each pick the smallest vertex that comes after
+    the previously picked one. Only an integer index is returned, so no gradient flows through the selection.
+    """
+    mesh = wp.mesh_get(mesh_id)
+    num_points = mesh.points.shape[0]
+    prev_d = float(-1.0e30)
+    prev_i = int(-1)
+    best_i = int(0)
+    for _p in range(rank + 1):
+        best_d = float(1.0e30)
+        best_i = int(-1)
+        for i in range(num_points):
+            pos = wp.cw_mul(mesh.points[i], geo_scale_a)
+            if sigma_perturbation != 0.0:
+                pos = gaussian_perturbation(pos, sigma_perturbation, seed_perturbation, shape_a, i)
+            d = mesh_plane_vertex_distance(wp.transform_point(X_ws_a, pos), X_ws_b, X_sw_b, geo_scale_b)
+            after_prev = d > prev_d or (d == prev_d and i > prev_i)
+            before_best = best_i < 0 or d < best_d or (d == best_d and i < best_i)
+            if after_prev and before_best:
+                best_d = d
+                best_i = i
+        prev_d = best_d
+        prev_i = best_i
+    return wp.max(best_i, 0)
+
+
 @wp.kernel
 def handle_contact_pairs(
     body_q: wp.array(dtype=wp.transform),
@@ -1133,6 +1205,7 @@ def handle_contact_pairs(
     edge_sdf_iter: int,
     sigma_perturbation: float,
     seed_perturbation: int,
+    mesh_plane_contact_points: int,
     # outputs
     contact_count: wp.array(dtype=int),
     contact_shape0: wp.array(dtype=int),
@@ -1537,9 +1610,24 @@ def handle_contact_pairs(
     elif geo_type_a == wp.sim.GEO_MESH and geo_type_b == wp.sim.GEO_PLANE:
         # vertex-based contact
         mesh = wp.mesh_get(geo.source[shape_a])
-        body_a_pos = wp.cw_mul(mesh.points[point_id], geo_scale_a)
+        vertex_id = point_id
+        if mesh_plane_contact_points > 0:
+            # point_id is the depth rank: use the (point_id)-th deepest vertex w.r.t. the plane
+            vertex_id = select_mesh_plane_vertex(
+                geo.source[shape_a],
+                point_id,
+                geo_scale_a,
+                X_ws_a,
+                X_ws_b,
+                X_sw_b,
+                geo_scale_b,
+                sigma_perturbation,
+                seed_perturbation,
+                shape_a,
+            )
+        body_a_pos = wp.cw_mul(mesh.points[vertex_id], geo_scale_a)
         if sigma_perturbation != 0.0:
-            body_a_pos = gaussian_perturbation(body_a_pos, sigma_perturbation, seed_perturbation, shape_a, point_id)
+            body_a_pos = gaussian_perturbation(body_a_pos, sigma_perturbation, seed_perturbation, shape_a, vertex_id)
         p_a_world = wp.transform_point(X_ws_a, body_a_pos)
         query_b = wp.transform_point(X_sw_b, p_a_world)
         p_b_body = closest_point_plane(geo_scale_b[0], geo_scale_b[1], query_b)
@@ -1610,6 +1698,9 @@ def collide(
     if requires_grad is None:
         requires_grad = model.requires_grad
 
+    # number of deepest mesh vertices used for mesh-vs-plane contacts (0 = all vertices)
+    mesh_plane_contact_points = int(getattr(model, "mesh_plane_contact_points", 0))
+
     with wp.ScopedTimer("collide", False):
         # generate soft contacts for particles and shapes except ground plane (last shape)
         if model.particle_count and model.shape_count > 1:
@@ -1670,6 +1761,7 @@ def collide(
                     model.rigid_contact_margin,
                     model.rigid_mesh_contact_max,
                     iterate_mesh_vertices,
+                    mesh_plane_contact_points,
                 ],
                 outputs=[
                     model.rigid_contact_count,
@@ -1699,6 +1791,7 @@ def collide(
                     model.rigid_contact_margin,
                     model.rigid_mesh_contact_max,
                     iterate_mesh_vertices,
+                    mesh_plane_contact_points,
                 ],
                 outputs=[
                     model.rigid_contact_count,
@@ -1752,7 +1845,8 @@ def collide(
                     model.rigid_contact_point_limit,
                     edge_sdf_iter,
                     model.sigma_mesh_perturbation,
-                    model.iteration_nr
+                    model.iteration_nr,
+                    mesh_plane_contact_points,
                 ],
                 outputs=[
                     model.rigid_contact_count,

@@ -639,6 +639,7 @@ class Model:
         rigid_contact_max (int): Maximum number of potential rigid body contact points to generate ignoring the `rigid_mesh_contact_max` limit.
         rigid_contact_max_limited (int): Maximum number of potential rigid body contact points to generate respecting the `rigid_mesh_contact_max` limit.
         rigid_mesh_contact_max (int): Maximum number of rigid body contact points to generate per mesh (0 = unlimited, default)
+        mesh_plane_contact_points (int): Number of deepest mesh vertices used for mesh-vs-plane contacts (0 = all vertices, default)
         rigid_contact_margin (float): Contact margin for generation of rigid body contacts
         rigid_contact_torsional_friction (float): Torsional friction coefficient for rigid body contacts (used by :class:`XPBDIntegrator`)
         rigid_contact_rolling_friction (float): Rolling friction coefficient for rigid body contacts (used by :class:`XPBDIntegrator`)
@@ -822,6 +823,7 @@ class Model:
         self.rigid_contact_max = 0
         self.rigid_contact_max_limited = 0
         self.rigid_mesh_contact_max = 0
+        self.mesh_plane_contact_points = 0
         self.rigid_contact_margin = None
         self.rigid_contact_torsional_friction = None
         self.rigid_contact_rolling_friction = None
@@ -1008,6 +1010,7 @@ class Model:
                 self.shape_contact_pairs,
                 self.shape_geo,
                 self.rigid_mesh_contact_max,
+                self.mesh_plane_contact_points,
             ],
             outputs=[contact_count],
             device=self.device,
@@ -1021,6 +1024,7 @@ class Model:
                 self.shape_ground_contact_pairs,
                 self.shape_geo,
                 self.rigid_mesh_contact_max,
+                self.mesh_plane_contact_points,
             ],
             outputs=[contact_count],
             device=self.device,
@@ -1337,6 +1341,9 @@ class ModelBuilder:
 
         # maximum number of contact points to generate per mesh shape
         self.rigid_mesh_contact_max = 0  # 0 = unlimited
+
+        # number of deepest mesh vertices used for mesh-vs-plane contacts
+        self.mesh_plane_contact_points = 0  # 0 = all vertices
 
         # contacts to be generated within the given distance margin to be generated at
         # every simulation substep (can be 0 if only one PBD solver iteration is used)
@@ -4807,6 +4814,8 @@ class ModelBuilder:
             if m.particle_count:
                 m.allocate_soft_contacts(self.soft_contact_max, requires_grad=requires_grad)
             m.find_shape_contact_pairs()
+            # needed by count_contact_points (and later by collide)
+            m.mesh_plane_contact_points = self.mesh_plane_contact_points
             if self.num_rigid_contacts_per_env is None:
                 contact_count, limited_contact_count = m.count_contact_points()
             else:
