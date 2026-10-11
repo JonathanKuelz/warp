@@ -1191,6 +1191,35 @@ def select_mesh_plane_vertex(
 
 
 @wp.kernel
+def accumulate_mesh_vertex_area(
+    face_shape: wp.array(dtype=int),
+    face_index: wp.array(dtype=int),
+    shape_vertex_start: wp.array(dtype=int),
+    geo: ModelShapeGeometry,
+    # outputs
+    vertex_area: wp.array(dtype=float),
+):
+    """Lumped vertex areas of the current (scaled) mesh vertices: every triangle adds a third of its area to each of its
+    vertices. Runs inside the tape, so the pressure-field contact weights carry dA/dx to the mesh vertices."""
+    tid = wp.tid()
+    shape = face_shape[tid]
+    face = face_index[tid]
+    mesh = wp.mesh_get(geo.source[shape])
+    i = mesh.indices[3 * face + 0]
+    j = mesh.indices[3 * face + 1]
+    k = mesh.indices[3 * face + 2]
+    scale = geo.scale[shape]
+    a = wp.cw_mul(mesh.points[i], scale)
+    b = wp.cw_mul(mesh.points[j], scale)
+    c = wp.cw_mul(mesh.points[k], scale)
+    third = wp.length(wp.cross(b - a, c - a)) / 6.0
+    start = shape_vertex_start[shape]
+    wp.atomic_add(vertex_area, start + i, third)
+    wp.atomic_add(vertex_area, start + j, third)
+    wp.atomic_add(vertex_area, start + k, third)
+
+
+@wp.kernel
 def handle_contact_pairs(
     body_q: wp.array(dtype=wp.transform),
     shape_X_bs: wp.array(dtype=wp.transform),
@@ -1206,6 +1235,9 @@ def handle_contact_pairs(
     sigma_perturbation: float,
     seed_perturbation: int,
     mesh_plane_contact_points: int,
+    shape_vertex_start: wp.array(dtype=int),
+    vertex_area: wp.array(dtype=float),
+    inv_contact_area_ref: float,
     # outputs
     contact_count: wp.array(dtype=int),
     contact_shape0: wp.array(dtype=int),
@@ -1218,6 +1250,7 @@ def handle_contact_pairs(
     contact_thickness: wp.array(dtype=float),
     contact_pairwise_counter: wp.array(dtype=int),
     contact_tids: wp.array(dtype=int),
+    contact_weight: wp.array(dtype=float),
 ):
     """
     Custom changes made in this function:
@@ -1226,6 +1259,10 @@ def handle_contact_pairs(
     corresponds to the default kernel. seed_perturbation is useful to control randomness in the process: through random
     seeding, we ensure that the same mesh vertex of the same geo is distorted in the same way if seed_perturbation is
     the same, but if one of these indices differ, distortion will be different, soo.
+
+    contact_weight receives the lumped vertex area times inv_contact_area_ref (pressure-field law) for contacts of a
+    mesh vertex (shape a is the mesh), and -1 (legacy law) for all other contacts, for all contacts if
+    inv_contact_area_ref is 0, and for the K deepest vertex contacts (mesh_plane_contact_points > 0).
     """
     tid = wp.tid()
     shape_a = contact_broad_shape0[tid]
@@ -1273,6 +1310,7 @@ def handle_contact_pairs(
     distance = 1.0e6
     u = float(0.0)
     thickness = thickness_a + thickness_b
+    area_vertex = int(-1)  # mesh vertex of shape a whose lumped area weights this contact (-1: legacy law)
 
     if geo_type_a == wp.sim.GEO_SPHERE:
         p_a_world = wp.transform_get_translation(X_ws_a)
@@ -1476,6 +1514,7 @@ def handle_contact_pairs(
     elif geo_type_a == wp.sim.GEO_MESH and geo_type_b == wp.sim.GEO_CAPSULE:
         # vertex-based contact
         mesh = wp.mesh_get(geo.source[shape_a])
+        area_vertex = point_id
         body_a_pos = wp.cw_mul(mesh.points[point_id], geo_scale_a)
         if sigma_perturbation != 0.0:
             body_a_pos = gaussian_perturbation(body_a_pos, sigma_perturbation, seed_perturbation, shape_a, point_id)
@@ -1533,6 +1572,7 @@ def handle_contact_pairs(
     elif geo_type_a == wp.sim.GEO_MESH and geo_type_b == wp.sim.GEO_BOX:
         # vertex-based contact
         mesh = wp.mesh_get(geo.source[shape_a])
+        area_vertex = point_id
         body_a_pos = wp.cw_mul(mesh.points[point_id], geo_scale_a)
         if sigma_perturbation != 0.0:
             body_a_pos = gaussian_perturbation(body_a_pos, sigma_perturbation, seed_perturbation, shape_a, point_id)
@@ -1578,6 +1618,7 @@ def handle_contact_pairs(
         # vertex-based contact
         mesh = wp.mesh_get(geo.source[shape_a])
         mesh_b = geo.source[shape_b]
+        area_vertex = point_id
 
         body_a_pos = wp.cw_mul(mesh.points[point_id], geo_scale_a)
         if sigma_perturbation != 0.0:
@@ -1625,6 +1666,8 @@ def handle_contact_pairs(
                 seed_perturbation,
                 shape_a,
             )
+        else:
+            area_vertex = vertex_id  # only all-vertex contacts are area weighted, the K deepest keep the legacy law
         body_a_pos = wp.cw_mul(mesh.points[vertex_id], geo_scale_a)
         if sigma_perturbation != 0.0:
             body_a_pos = gaussian_perturbation(body_a_pos, sigma_perturbation, seed_perturbation, shape_a, vertex_id)
@@ -1674,6 +1717,15 @@ def handle_contact_pairs(
         contact_offset1[index] = wp.transform_vector(X_bw_b, thickness_b * normal)
         contact_normal[index] = normal
         contact_thickness[index] = thickness
+        weight = float(-1.0)
+        if inv_contact_area_ref > 0.0 and area_vertex >= 0:
+            weight = vertex_area[shape_vertex_start[shape_a] + area_vertex] * inv_contact_area_ref
+        contact_weight[index] = weight
+
+
+def pressure_contacts_enabled(model: Model) -> bool:
+    """Whether mesh vertex contacts use the pressure-field law (both contact_smoothing and contact_area_ref > 0)."""
+    return getattr(model, "contact_smoothing", 0.0) > 0.0 and getattr(model, "contact_area_ref", 0.0) > 0.0
 
 
 def collide(
@@ -1700,6 +1752,10 @@ def collide(
 
     # number of deepest mesh vertices used for mesh-vs-plane contacts (0 = all vertices)
     mesh_plane_contact_points = int(getattr(model, "mesh_plane_contact_points", 0))
+    # the pressure-field law weights mesh vertex contacts by lumped area / contact_area_ref (0 = legacy law)
+    inv_contact_area_ref = 0.0
+    if pressure_contacts_enabled(model) and model.mesh_face_shape is not None and len(model.mesh_face_shape):
+        inv_contact_area_ref = 1.0 / model.contact_area_ref
 
     with wp.ScopedTimer("collide", False):
         # generate soft contacts for particles and shapes except ground plane (last shape)
@@ -1816,6 +1872,9 @@ def collide(
                 model.rigid_contact_tids = wp.full_like(model.rigid_contact_tids, -1)
                 model.rigid_contact_shape0 = wp.empty_like(model.rigid_contact_shape0)
                 model.rigid_contact_shape1 = wp.empty_like(model.rigid_contact_shape1)
+                model.rigid_contact_weight = wp.empty_like(model.rigid_contact_weight)
+                if inv_contact_area_ref > 0.0:
+                    model.mesh_vertex_area = wp.empty_like(model.mesh_vertex_area)
 
                 if model.rigid_contact_pairwise_counter is not None:
                     model.rigid_contact_pairwise_counter = wp.zeros_like(model.rigid_contact_pairwise_counter)
@@ -1828,6 +1887,16 @@ def collide(
 
             model.rigid_contact_shape0.fill_(-1)
             model.rigid_contact_shape1.fill_(-1)
+
+            if inv_contact_area_ref > 0.0:
+                model.mesh_vertex_area.zero_()
+                wp.launch(
+                    kernel=accumulate_mesh_vertex_area,
+                    dim=len(model.mesh_face_shape),
+                    inputs=[model.mesh_face_shape, model.mesh_face_index, model.shape_mesh_vertex_start, model.shape_geo],
+                    outputs=[model.mesh_vertex_area],
+                    device=model.device,
+                )
 
             wp.launch(
                 kernel=handle_contact_pairs,
@@ -1847,6 +1916,9 @@ def collide(
                     model.sigma_mesh_perturbation,
                     model.iteration_nr,
                     mesh_plane_contact_points,
+                    model.shape_mesh_vertex_start,
+                    model.mesh_vertex_area,
+                    inv_contact_area_ref,
                 ],
                 outputs=[
                     model.rigid_contact_count,
@@ -1860,6 +1932,7 @@ def collide(
                     model.rigid_contact_thickness,
                     model.rigid_contact_pairwise_counter,
                     model.rigid_contact_tids,
+                    model.rigid_contact_weight,
                 ],
                 device=model.device,
             )

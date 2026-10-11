@@ -867,6 +867,78 @@ def eval_particle_contacts(
             wp.atomic_add(body_f, body_index, wp.spatial_vector(wp.cross(r, f_total), f_total))
 
 
+@wp.func
+def contact_softplus(x: float):
+    """log(1 + exp(x)), without overflow."""
+    return wp.max(x, 0.0) + wp.log(1.0 + wp.exp(-wp.abs(x)))
+
+
+@wp.func
+def contact_sigmoid(x: float):
+    """1 / (1 + exp(-x)), without overflow."""
+    e = wp.exp(-wp.abs(x))
+    if x >= 0.0:
+        return 1.0 / (1.0 + e)
+    return e / (1.0 + e)
+
+
+@wp.func
+def pressure_contact_force(
+    d: float,
+    vn: float,
+    vt: wp.vec3,
+    n: wp.vec3,
+    weight: float,
+    ke: float,
+    kd: float,
+    kf: float,
+    mu: float,
+    eps: float,
+    friction_smoothing: float,
+):
+    """Pressure-field contact force of one mesh vertex, in the sign convention of eval_rigid_contacts (f_total).
+
+    The penalty acts on the smooth penetration s = eps * softplus(-d / eps) instead of max(-d, 0), so the force has
+    no switch at d = 0 (the loss is smooth in contact timing), and is scaled by weight = lumped vertex area / reference
+    area, so the total force of a mesh does not grow with the number of its vertices that touch.
+    """
+    s = eps * contact_softplus(-d / eps)
+    fn = -weight * ke * s
+    # damping only opposes approach, as in the legacy law, but is switched on smoothly
+    fd = weight * kd * wp.min(vn, 0.0) * contact_sigmoid(-d / eps)
+    ft = wp.vec3(0.0)
+    vs = wp.norm_huber(vt, delta=friction_smoothing)
+    if vs > 0.0:
+        ft = vt / vs * wp.min(weight * kf * vs, -mu * (fn + fd))
+    return n * (fn + fd) + ft
+
+
+@wp.func
+def apply_contact_force(
+    body_f: wp.array(dtype=wp.spatial_vector),
+    body_a: int,
+    body_b: int,
+    bx_a: wp.vec3,
+    bx_b: wp.vec3,
+    r_a: wp.vec3,
+    r_b: wp.vec3,
+    f_total: wp.vec3,
+    force_in_world_frame: bool,
+):
+    """Accumulate the contact force f_total (sign convention of eval_rigid_contacts) on both bodies."""
+    if body_a >= 0:
+        if force_in_world_frame:
+            wp.atomic_add(body_f, body_a, wp.spatial_vector(wp.cross(bx_a, f_total), f_total))
+        else:
+            wp.atomic_sub(body_f, body_a, wp.spatial_vector(wp.cross(r_a, f_total), f_total))
+
+    if body_b >= 0:
+        if force_in_world_frame:
+            wp.atomic_sub(body_f, body_b, wp.spatial_vector(wp.cross(bx_b, f_total), f_total))
+        else:
+            wp.atomic_add(body_f, body_b, wp.spatial_vector(wp.cross(r_b, f_total), f_total))
+
+
 @wp.kernel
 def eval_rigid_contacts(
     body_q: wp.array(dtype=wp.transform),
@@ -883,9 +955,13 @@ def eval_rigid_contacts(
     contact_shape1: wp.array(dtype=int),
     force_in_world_frame: bool,
     friction_smoothing: float,
+    contact_weight: wp.array(dtype=float),
+    contact_smoothing: float,
     # outputs
     body_f: wp.array(dtype=wp.spatial_vector),
 ):
+    """Penalty contact forces. Mesh vertex contacts with a weight >= 0 (see collide) use the pressure-field law
+    (pressure_contact_force) if contact_smoothing > 0; all other contacts use the legacy law below."""
     tid = wp.tid()
 
     count = contact_count[0]
@@ -952,7 +1028,11 @@ def eval_rigid_contacts(
 
     d = wp.dot(n, bx_a - bx_b)
 
-    if d >= ka:
+    weight = float(-1.0)
+    if contact_smoothing > 0.0:
+        weight = contact_weight[tid]
+
+    if d >= ka and weight < 0.0:
         return
 
     # compute contact point velocity
@@ -985,6 +1065,11 @@ def eval_rigid_contacts(
     vn = wp.dot(n, v)
     vt = v - n * vn
 
+    if weight >= 0.0:
+        f_pressure = pressure_contact_force(d, vn, vt, n, weight, ke, kd, kf, mu, contact_smoothing, friction_smoothing)
+        apply_contact_force(body_f, body_a, body_b, bx_a, bx_b, r_a, r_b, f_pressure, force_in_world_frame)
+        return
+
     # contact elastic
     fn = d * ke
 
@@ -1016,17 +1101,7 @@ def eval_rigid_contacts(
     # f_total = n * (fn + fd)
     # f_total = n * fn
 
-    if body_a >= 0:
-        if force_in_world_frame:
-            wp.atomic_add(body_f, body_a, wp.spatial_vector(wp.cross(bx_a, f_total), f_total))
-        else:
-            wp.atomic_sub(body_f, body_a, wp.spatial_vector(wp.cross(r_a, f_total), f_total))
-
-    if body_b >= 0:
-        if force_in_world_frame:
-            wp.atomic_sub(body_f, body_b, wp.spatial_vector(wp.cross(bx_b, f_total), f_total))
-        else:
-            wp.atomic_add(body_f, body_b, wp.spatial_vector(wp.cross(r_b, f_total), f_total))
+    apply_contact_force(body_f, body_a, body_b, bx_a, bx_b, r_a, r_b, f_total, force_in_world_frame)
 
 
 @wp.func
@@ -1801,6 +1876,8 @@ def eval_body_contact_forces(model: Model, state: State, particle_f: wp.array, f
                 model.rigid_contact_shape1,
                 False,
                 friction_smoothing,
+                model.rigid_contact_weight,
+                model.contact_smoothing,
             ],
             outputs=[state.body_f],
             device=model.device,

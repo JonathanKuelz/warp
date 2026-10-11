@@ -1845,6 +1845,8 @@ class FeatherstoneIntegrator(Integrator):
                             model.rigid_contact_shape1,
                             True,
                             self.friction_smoothing,
+                            model.rigid_contact_weight,
+                            model.contact_smoothing,
                         ],
                         outputs=[body_f],
                         device=model.device,

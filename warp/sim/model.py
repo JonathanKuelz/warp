@@ -640,6 +640,8 @@ class Model:
         rigid_contact_max_limited (int): Maximum number of potential rigid body contact points to generate respecting the `rigid_mesh_contact_max` limit.
         rigid_mesh_contact_max (int): Maximum number of rigid body contact points to generate per mesh (0 = unlimited, default)
         mesh_plane_contact_points (int): Number of deepest mesh vertices used for mesh-vs-plane contacts (0 = all vertices, default)
+        contact_smoothing (float): Smoothing length eps of the pressure-field contact law for mesh vertex contacts (0 = legacy law, default)
+        contact_area_ref (float): Reference area of the pressure-field law; a vertex contact is weighted by its lumped area / contact_area_ref (0 = legacy law, default)
         rigid_contact_margin (float): Contact margin for generation of rigid body contacts
         rigid_contact_torsional_friction (float): Torsional friction coefficient for rigid body contacts (used by :class:`XPBDIntegrator`)
         rigid_contact_rolling_friction (float): Rolling friction coefficient for rigid body contacts (used by :class:`XPBDIntegrator`)
@@ -651,6 +653,11 @@ class Model:
         rigid_contact_offset1 (array): Contact offset due to contact thickness relative to body 1, shape [rigid_contact_max], vec3
         rigid_contact_normal (array): Contact normal in world space, shape [rigid_contact_max], vec3
         rigid_contact_thickness (array): Total contact thickness, shape [rigid_contact_max], float
+        rigid_contact_weight (array): Area weight of a mesh vertex contact for the pressure-field law (-1 = legacy law), shape [rigid_contact_max], float
+        shape_mesh_vertex_start (array): Offset of a mesh shape's vertices in mesh_vertex_area (-1 for other shapes), shape [shape_count], int
+        mesh_vertex_area (array): Lumped vertex areas (a third of the adjacent triangle areas) of all mesh shapes, recomputed by :func:`collide`, float
+        mesh_face_shape (array): Mesh shape of every triangle in mesh_vertex_area's layout, int
+        mesh_face_index (array): Index of every triangle within its mesh, int
         rigid_contact_shape0 (array): Index of shape 0 per contact, shape [rigid_contact_max], int
         rigid_contact_shape1 (array): Index of shape 1 per contact, shape [rigid_contact_max], int
         rigid_contact_tids (array): Triangle indices of the contact points, shape [rigid_contact_max], int
@@ -824,6 +831,8 @@ class Model:
         self.rigid_contact_max_limited = 0
         self.rigid_mesh_contact_max = 0
         self.mesh_plane_contact_points = 0
+        self.contact_smoothing = 0.0
+        self.contact_area_ref = 0.0
         self.rigid_contact_margin = None
         self.rigid_contact_torsional_friction = None
         self.rigid_contact_rolling_friction = None
@@ -835,6 +844,11 @@ class Model:
         self.rigid_contact_offset1 = None
         self.rigid_contact_normal = None
         self.rigid_contact_thickness = None
+        self.rigid_contact_weight = None
+        self.shape_mesh_vertex_start = None
+        self.mesh_vertex_area = None
+        self.mesh_face_shape = None
+        self.mesh_face_index = None
         self.rigid_contact_shape0 = None
         self.rigid_contact_shape1 = None
         self.rigid_contact_tids = None
@@ -1072,6 +1086,10 @@ class Model:
             # combined thickness of both shapes
             target.rigid_contact_thickness = wp.zeros(
                 self.rigid_contact_max_limited, dtype=wp.float32, requires_grad=requires_grad
+            )
+            # area weight of a mesh vertex contact for the pressure-field law (-1 = legacy law)
+            target.rigid_contact_weight = wp.full(
+                self.rigid_contact_max_limited, -1.0, dtype=wp.float32, requires_grad=requires_grad
             )
             # ID of the first shape in the contact pair
             target.rigid_contact_shape0 = wp.zeros(self.rigid_contact_max_limited, dtype=wp.int32)
@@ -1344,6 +1362,11 @@ class ModelBuilder:
 
         # number of deepest mesh vertices used for mesh-vs-plane contacts
         self.mesh_plane_contact_points = 0  # 0 = all vertices
+
+        # pressure-field contact law for mesh vertex contacts (active only if both are > 0, otherwise the legacy law):
+        # smoothing length eps of the penetration and reference area of the lumped vertex area weight
+        self.contact_smoothing = 0.0
+        self.contact_area_ref = 0.0
 
         # contacts to be generated within the given distance margin to be generated at
         # every simulation substep (can be 0 if only one PBD solver iteration is used)
@@ -4573,6 +4596,25 @@ class ModelBuilder:
             target_max_min_color_ratio=target_max_min_color_ratio,
         )
 
+    def _finalize_mesh_vertex_area_layout(self, m: Model, requires_grad: bool):
+        """One flat lumped-vertex-area array over all mesh shapes (per-shape offsets) and a flat triangle list, so that
+        :func:`collide` can recompute the areas from the current mesh vertices with one kernel launch."""
+        vertex_start, face_shape, face_index = [], [], []
+        num_vertices = 0
+        for shape, geo in enumerate(self.shape_geo_src):
+            if self.shape_geo_type[shape] != GEO_MESH or not geo:
+                vertex_start.append(-1)
+                continue
+            vertex_start.append(num_vertices)
+            num_vertices += len(geo.vertices)
+            num_faces = len(geo.indices) // 3
+            face_shape.extend([shape] * num_faces)
+            face_index.extend(range(num_faces))
+        m.shape_mesh_vertex_start = wp.array(vertex_start, dtype=wp.int32)
+        m.mesh_face_shape = wp.array(face_shape, dtype=wp.int32)
+        m.mesh_face_index = wp.array(face_index, dtype=wp.int32)
+        m.mesh_vertex_area = wp.zeros(max(num_vertices, 1), dtype=wp.float32, requires_grad=requires_grad)
+
     def finalize(self, device=None, requires_grad=False) -> Model:
         """Convert this builder object to a concrete model for simulation.
 
@@ -4660,6 +4702,7 @@ class ModelBuilder:
             m.shape_geo.is_solid = wp.array(self.shape_geo_is_solid, dtype=wp.uint8)
             m.shape_geo.thickness = wp.array(self.shape_geo_thickness, dtype=wp.float32, requires_grad=requires_grad)
             m.shape_geo_src = self.shape_geo_src  # used for rendering
+            self._finalize_mesh_vertex_area_layout(m, requires_grad)
             # store refs to geometry
             m.geo_meshes = self.geo_meshes
             m.geo_sdfs = self.geo_sdfs
@@ -4827,6 +4870,8 @@ class ModelBuilder:
                     count=contact_count, limited_contact_count=limited_contact_count, requires_grad=requires_grad
                 )
             m.rigid_mesh_contact_max = self.rigid_mesh_contact_max
+            m.contact_smoothing = self.contact_smoothing
+            m.contact_area_ref = self.contact_area_ref
             m.rigid_contact_margin = self.rigid_contact_margin
             m.rigid_contact_torsional_friction = self.rigid_contact_torsional_friction
             m.rigid_contact_rolling_friction = self.rigid_contact_rolling_friction
