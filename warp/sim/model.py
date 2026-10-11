@@ -1202,6 +1202,7 @@ class ModelBuilder:
         self.shape_body = []
         self.shape_visible = []
         self.shape_geo_type = []
+        self.shape_density = []
         self.shape_geo_scale = []
         self.shape_geo_src = []
         self.shape_geo_is_solid = []
@@ -1266,6 +1267,7 @@ class ModelBuilder:
         # rigid bodies
         self.body_mass = []
         self.body_inertia = []
+        self.body_armature = []
         self.body_inv_mass = []
         self.body_inv_inertia = []
         self.body_com = []
@@ -1526,6 +1528,7 @@ class ModelBuilder:
             self.last_collision_group += builder.last_collision_group
 
         more_builder_attrs = [
+            "body_armature",
             "body_inertia",
             "body_mass",
             "body_inv_inertia",
@@ -1554,6 +1557,7 @@ class ModelBuilder:
             "shape_visible",
             "shape_geo_type",
             "shape_geo_scale",
+            "shape_density",
             "shape_geo_src",
             "shape_geo_is_solid",
             "shape_geo_thickness",
@@ -1642,6 +1646,7 @@ class ModelBuilder:
         # body data
         inertia = I_m + wp.mat33(np.eye(3)) * armature
         self.body_inertia.append(inertia)
+        self.body_armature.append(armature)
         self.body_mass.append(m)
         self.body_com.append(com)
 
@@ -3475,6 +3480,7 @@ class ModelBuilder:
         self.shape_transform.append(wp.transform(pos, rot))
         self.shape_visible.append(is_visible)
         self.shape_geo_type.append(type)
+        self.shape_density.append(density)
         self.shape_geo_scale.append((scale[0], scale[1], scale[2]))
         self.shape_geo_src.append(src)
         self.shape_geo_thickness.append(thickness)
