@@ -1,3 +1,16 @@
+## Changes in this fork (vs NVIDIA/warp 1049c9e9)
+
+- `warp.sim`: no deprecation warning on import.
+- `Model`: gravity and up vector stored as `np.float32`.
+- Optional mesh vertex perturbation (`collide.py`, `model.py`).
+- Featherstone replaced by the rewarped integrator; the original is `integrator_featherstone_deprecated.py`.
+- Featherstone: overwritten `body_q` adjoint is zeroed, so `eval_fk` is not back-propagated twice.
+- `ModelBuilder` records `shape_density` and `body_armature`.
+- Mesh-vs-plane contacts: `mesh_plane_contact_points` uses the K deepest vertices per mesh.
+- Pressure-field contact law for mesh shapes (`contact_smoothing`, `contact_area_ref`), off by default.
+- Featherstone simulates each articulation in a frame at its root body, accurate far from the origin.
+- Test: `warp/tests/sim/test_featherstone_origin.py`.
+
 [![PyPI version](https://badge.fury.io/py/warp-lang.svg)](https://badge.fury.io/py/warp-lang)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 ![GitHub commit activity](https://img.shields.io/github/commit-activity/m/NVIDIA/warp?link=https%3A%2F%2Fgithub.com%2FNVIDIA%2Fwarp%2Fcommits%2Fmain)
