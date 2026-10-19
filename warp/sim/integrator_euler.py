@@ -898,9 +898,22 @@ def pressure_contact_force(
 ):
     """Pressure-field contact force of one mesh vertex, in the sign convention of eval_rigid_contacts (f_total).
 
-    The penalty acts on the smooth penetration s = eps * softplus(-d / eps) instead of max(-d, 0), so the force has
-    no switch at d = 0 (the loss is smooth in contact timing), and is scaled by weight = lumped vertex area / reference
-    area, so the total force of a mesh does not grow with the number of its vertices that touch.
+    The penalty acts on the smooth penetration s = eps * softplus(-d / eps) and is scaled by
+    weight = vertex area / reference area, so the total force of a mesh does not grow with the number of its vertices.
+
+    Args:
+        d (float): Signed distance between the contact points along n, negative when penetrating.
+        vn (float): Relative normal velocity along n, negative when approaching.
+        vt (wp.vec3): Relative tangential velocity.
+        n (wp.vec3): Contact normal in world frame, from shape b to shape a.
+        weight (float): Vertex area (a third of each adjacent triangle) / contact_area_ref, >= 0.
+        ke (float): Normal stiffness of a vertex with weight 1, i.e. of a patch of area contact_area_ref.
+        kd (float): Normal damping of a vertex with weight 1, only opposes approach.
+        kf (float): Friction stiffness of a vertex with weight 1, capped by mu times the normal force (Coulomb).
+        mu (float): Friction coefficient.
+        eps (float): Smoothing length of the penetration (model.contact_smoothing), > 0.
+        friction_smoothing (float): The delta value for the Huber norm (see :func:`warp.math.norm_huber`) used for the
+            friction velocity normalization.
     """
     s = eps * contact_softplus(-d / eps)
     fn = -weight * ke * s
