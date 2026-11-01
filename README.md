@@ -7,7 +7,9 @@
 - Featherstone: overwritten `body_q` adjoint is zeroed, so `eval_fk` is not back-propagated twice.
 - `ModelBuilder` records `shape_density` and `body_armature`.
 - Mesh-vs-plane contacts: `mesh_plane_contact_points` uses the K deepest vertices per mesh.
-- Pressure-field contact law for mesh shapes (`contact_smoothing`, `contact_area_ref`), off by default.
+- Pressure-field contact law for mesh shapes (`contact_smoothing`, `contact_area_ref`), off by default. Its slip
+  velocity and moment arm are taken on the contact surface (the vertex projected along the normal), so a rolling body
+  does not see the depth-dependent slip of its penetrating vertices.
 - Featherstone simulates each articulation in a frame at its root body, accurate far from the origin.
 - Test: `warp/tests/sim/test_featherstone_origin.py`.
 

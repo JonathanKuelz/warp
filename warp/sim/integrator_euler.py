@@ -1044,6 +1044,12 @@ def eval_rigid_contacts(
     weight = float(-1.0)
     if contact_smoothing > 0.0:
         weight = contact_weight[tid]
+        if weight >= 0.0:
+            # pressure-field law: slip velocity and moment arm on the contact surface (the vertex projected along n
+            # onto the other shape), not at the penetrating vertex. At depth d a vertex of a rolling body moves at
+            # omega * d relative to the surface, which the legacy evaluation turns into rolling resistance.
+            bx_a = bx_a - n * d
+            r_a = r_a - n * d
 
     if d >= ka and weight < 0.0:
         return
